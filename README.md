@@ -1,6 +1,9 @@
-# HYDAC Lead Processor
+# HYDAC Lead Processor - Step 2
 
-Fresh Streamlit starter app.
+This version confirms:
+- Streamlit loads
+- MSG upload works
+- Excel download works
 
 Deploy settings:
 - Main file path: app.py
