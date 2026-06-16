@@ -1,14 +1,15 @@
-# HYDAC Lead Processor - Step 3
+# HYDAC Lead Agent - Step 4
 
-This version adds:
-- MSG parsing
-- Customer detail extraction from email text
-- Excel output
-- Attachment filtering
+This version changes the design from extractor to agent.
 
-Attachment rule:
-- Ignore generic/signature images like image.png, image001.png, logo.png
-- Keep specific customer/request attachments like BIERI 3999534.png
+Features:
+- MSG upload
+- Reads email text
+- Detects likely customer/contact
+- Ignores HYDAC/internal sender where possible
+- Classifies valid vs ignored attachments
+- Shows Agent Review Panel
+- Allows manual correction before Excel generation
 
 Deploy settings:
 - Main file path: app.py
