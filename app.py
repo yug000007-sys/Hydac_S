@@ -1,3 +1,4 @@
+import json
 import re
 import tempfile
 from io import BytesIO
@@ -47,6 +48,11 @@ SIGNATURE_IMAGE_NAMES = {
     "image003.png", "image003.jpg", "image003.jpeg",
     "image004.png", "image004.jpg", "image004.jpeg",
     "image005.png", "image005.jpg", "image005.jpeg",
+    "image006.png", "image006.jpg", "image006.jpeg",
+    "image007.png", "image007.jpg", "image007.jpeg",
+    "image008.png", "image008.jpg", "image008.jpeg",
+    "image009.png", "image009.jpg", "image009.jpeg",
+    "image010.png", "image010.jpg", "image010.jpeg",
     "logo.png", "logo.jpg", "facebook.png", "linkedin.png",
     "twitter.png", "instagram.png", "youtube.png", "banner.png", "banner.jpg"
 }
@@ -133,129 +139,6 @@ def extract_phones(text):
     return out[:4]
 
 
-def parse_from_lines(text):
-    """
-    Reads email trail and returns possible people from From: blocks.
-    Prioritizes non-HYDAC emails.
-    """
-    candidates = []
-    for line in (text or "").splitlines():
-        line = line.strip()
-        m = re.match(r"^(From|Von|De):\s*(.+)$", line, re.I)
-        if not m:
-            continue
-        value = m.group(2).strip()
-        emails = extract_emails(value)
-        email = emails[0] if emails else ""
-        name = value.split("<")[0].strip().strip('"')
-        if not name and email:
-            name = email.split("@")[0].replace(".", " ").title()
-        if email:
-            candidates.append({"name": name, "email": email, "source": line})
-    return candidates
-
-
-def infer_contact(parsed):
-    text = parsed["full_text"]
-    body = parsed["body"]
-    candidates = parse_from_lines(text)
-
-    # First choice: non-HYDAC From: candidate in trail.
-    for c in candidates:
-        if c["email"] and not is_internal_email(c["email"]):
-            first, last = split_name(c["name"])
-            return {
-                "first": first,
-                "last": last,
-                "email": c["email"],
-                "reason": "Original non-HYDAC sender found in email trail.",
-                "confidence": "High",
-            }
-
-    # Second choice: first non-HYDAC email anywhere.
-    for e in extract_emails(text):
-        if not is_internal_email(e):
-            name_guess = e.split("@")[0].replace(".", " ").replace("_", " ").title()
-            first, last = split_name(name_guess)
-            return {
-                "first": first,
-                "last": last,
-                "email": e,
-                "reason": "First non-HYDAC email found.",
-                "confidence": "Medium",
-            }
-
-    # Last fallback: message sender.
-    sender = parsed["sender"]
-    emails = extract_emails(sender)
-    email = emails[0] if emails else ""
-    name = sender.split("<")[0].strip().strip('"')
-    first, last = split_name(name)
-    return {
-        "first": first,
-        "last": last,
-        "email": email,
-        "reason": "Fallback to latest sender.",
-        "confidence": "Low",
-    }
-
-
-def extract_request(body):
-    body = clean_text(body)
-
-    # Remove Microsoft/security blocks where possible.
-    remove_patterns = [
-        r"Learn About Sender Identification.*",
-        r"You don't often get email from.*",
-        r"CAUTION:.*",
-    ]
-    for p in remove_patterns:
-        body = re.sub(p, "", body, flags=re.I | re.S)
-
-    # Split at common signature/history markers.
-    markers = [
-        "\nBest regards", "\nRegards", "\nThanks", "\nThank you",
-        "\nMit freundlichen", "\nFrom:", "\nSent:", "\nVon:", "\nGesendet:",
-    ]
-
-    candidate = body
-    for marker in markers:
-        idx = candidate.find(marker)
-        if idx > 20:
-            candidate = candidate[:idx]
-            break
-
-    lines = [l.strip() for l in candidate.splitlines() if l.strip()]
-    while lines and re.match(r"^(hi|hello|dear|good morning|good afternoon|guten tag|team)\b", lines[0], re.I):
-        lines.pop(0)
-
-    request = clean_text("\n\n".join(lines[:10]))
-
-    # If latest body is just forward text, try to find question/request sentence in whole body.
-    if len(request) < 20:
-        req_lines = []
-        for l in body.splitlines():
-            if re.search(r"\b(quote|offer|price|availability|lead time|send|request|please|need|model|drawing|pump|filter)\b", l, re.I):
-                req_lines.append(l.strip())
-        request = clean_text("\n".join(req_lines[:8]))
-
-    return request
-
-
-def infer_company(text, email):
-    domain = ""
-    if email and "@" in email:
-        domain = email.split("@", 1)[1].lower()
-
-    # Avoid gmail/yahoo etc.
-    free_domains = ["gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com"]
-    if domain and domain not in free_domains and not is_internal_email(email):
-        return ""
-
-    # Later this will become AI-assisted/manual reviewed.
-    return ""
-
-
 def looks_like_valid_attachment(filename):
     if not filename:
         return False
@@ -327,6 +210,121 @@ def parse_msg(uploaded_file):
     }
 
 
+def fallback_agent(parsed):
+    text = parsed["full_text"]
+
+    emails = extract_emails(text)
+    customer_email = ""
+    for email in emails:
+        if not is_internal_email(email):
+            customer_email = email
+            break
+
+    first = ""
+    last = ""
+    if customer_email:
+        guess = customer_email.split("@")[0].replace(".", " ").replace("_", " ").title()
+        first, last = split_name(guess)
+
+    phones = extract_phones(text)
+    websites = extract_websites(text)
+
+    request = parsed["body"][:2000]
+    request = clean_text(request)
+
+    return {
+        "FirstName": first,
+        "LastName": last,
+        "ContactTitle": "",
+        "Email": customer_email,
+        "Company": "",
+        "Address": "",
+        "City": "",
+        "State": "",
+        "ZipCode": "",
+        "Country": "",
+        "PhoneSupplied": " : ".join(phones),
+        "WebAddress": websites[0] if websites else "",
+        "LeadComments": request,
+        "Product": "",
+        "Confidence": "Low",
+        "AgentReason": "Fallback rule mode. Add OpenAI API key for better customer understanding."
+    }
+
+
+def ai_agent(parsed, uploaded_name, valid_attachment_names):
+    api_key = st.secrets.get("OPENAI_API_KEY", "")
+
+    if not api_key:
+        return fallback_agent(parsed)
+
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+
+    email_text = parsed["full_text"][:18000]
+
+    prompt = f"""
+You are a lead-processing agent for HYDAC.
+
+Your task is NOT simple extraction. You must understand the email trail and identify the real external customer/requester.
+
+Important rules:
+1. Do not choose HYDAC employees, HYDAC Sales, HYDAC USA, or internal forwarders as the customer.
+2. If the email was forwarded by HYDAC, find the original outside customer who made the request.
+3. Ignore Microsoft security warnings, disclaimers, banners, and signatures.
+4. Ignore generic signature images such as image.png or image001.png.
+5. Customer request/LeadComments should be the actual customer request text, not a generic summary, when the request is clear.
+6. Split names into FirstName and LastName.
+7. PhoneSupplied format should be phone1 : phone2, with +, spaces, brackets removed, e.g. 43-31669151 : 43-6649614266.
+8. Leave fields blank if not available. Do not guess.
+9. Use signature block for company/title/address/phone when available.
+10. If confidence is low, explain why.
+
+Valid customer attachments already detected:
+{valid_attachment_names}
+
+Email file name:
+{uploaded_name}
+
+Email text:
+{email_text}
+
+Return ONLY valid JSON with these exact keys:
+FirstName, LastName, ContactTitle, Email, Company, Address, City, State, ZipCode, Country,
+PhoneSupplied, WebAddress, LeadComments, Product, Confidence, AgentReason
+"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            temperature=0,
+            messages=[
+                {"role": "system", "content": "You are a careful lead processing agent. Return only valid JSON."},
+                {"role": "user", "content": prompt},
+            ],
+        )
+
+        content = response.choices[0].message.content.strip()
+        content = content.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        data = json.loads(content)
+
+        required = [
+            "FirstName", "LastName", "ContactTitle", "Email", "Company", "Address",
+            "City", "State", "ZipCode", "Country", "PhoneSupplied", "WebAddress",
+            "LeadComments", "Product", "Confidence", "AgentReason"
+        ]
+
+        for key in required:
+            data.setdefault(key, "")
+
+        return data
+
+    except Exception as e:
+        data = fallback_agent(parsed)
+        data["AgentReason"] = f"AI failed; fallback used. Error: {e}"
+        return data
+
+
 def make_excel(row):
     wb = Workbook()
     ws = wb.active
@@ -361,42 +359,58 @@ def make_attachment_zip(valid_attachments):
 
 
 st.title("HYDAC Lead Agent")
-st.success("Step 4 running: Agent Review Panel enabled.")
+st.success("Step 5 running: AI customer understanding enabled.")
+
+with st.expander("How this agent works"):
+    st.write(
+        "The agent reads the email trail, avoids HYDAC/internal forwarders, "
+        "identifies the real outside customer, classifies attachments, and lets you review before Excel export."
+    )
+    if st.secrets.get("OPENAI_API_KEY", ""):
+        st.success("OpenAI API key detected. AI understanding mode is active.")
+    else:
+        st.warning("No OpenAI API key detected. App will run in fallback/manual-review mode.")
 
 uploaded_file = st.file_uploader("Upload MSG file", type=["msg"])
 
 if uploaded_file:
     try:
         parsed = parse_msg(uploaded_file)
-        contact = infer_contact(parsed)
-        websites = extract_websites(parsed["full_text"])
-        phones = extract_phones(parsed["full_text"])
-        request = extract_request(parsed["body"])
+        valid_names = [name for name, _ in parsed["valid_attachments"]]
+        agent_data = ai_agent(parsed, uploaded_file.name, valid_names)
 
         st.subheader("Agent Review Panel")
 
         col1, col2 = st.columns(2)
 
         with col1:
-            first = st.text_input("FirstName", value=contact["first"])
-            last = st.text_input("LastName", value=contact["last"])
-            email = st.text_input("Email", value=contact["email"])
-            company = st.text_input("Company", value=infer_company(parsed["full_text"], contact["email"]))
-            title = st.text_input("ContactTitle", value="")
-            phone = st.text_input("PhoneSupplied", value=" : ".join(phones))
-            website = st.text_input("WebAddress", value=websites[0] if websites else "")
+            first = st.text_input("FirstName", value=agent_data.get("FirstName", ""))
+            last = st.text_input("LastName", value=agent_data.get("LastName", ""))
+            title = st.text_input("ContactTitle", value=agent_data.get("ContactTitle", ""))
+            email = st.text_input("Email", value=agent_data.get("Email", ""))
+            company = st.text_input("Company", value=agent_data.get("Company", ""))
+            address = st.text_input("Address", value=agent_data.get("Address", ""))
 
         with col2:
-            received = st.text_input("ReceivedDateTime", value=parsed["date"])
-            pdf_base = uploaded_file.name.rsplit(".", 1)[0] + ".pdf"
-            valid_names = [name for name, _ in parsed["valid_attachments"]]
-            pdf_value = pdf_base + (("; Attachments: " + ", ".join(valid_names)) if valid_names else "")
-            pdf = st.text_input("PDF", value=pdf_value)
-            lead_source = st.text_input("LeadSource1", value="Email")
-            confidence = st.text_input("Agent Confidence", value=contact["confidence"])
-            st.caption(contact["reason"])
+            city = st.text_input("City", value=agent_data.get("City", ""))
+            state = st.text_input("State", value=agent_data.get("State", ""))
+            zip_code = st.text_input("ZipCode", value=agent_data.get("ZipCode", ""))
+            country = st.text_input("Country", value=agent_data.get("Country", ""))
+            phone = st.text_input("PhoneSupplied", value=agent_data.get("PhoneSupplied", ""))
+            website = st.text_input("WebAddress", value=agent_data.get("WebAddress", ""))
 
-        comments = st.text_area("LeadComments / Customer Request", value=request, height=180)
+        product = st.text_input("Product", value=agent_data.get("Product", ""))
+        received = st.text_input("ReceivedDateTime", value=parsed["date"])
+
+        pdf_base = uploaded_file.name.rsplit(".", 1)[0] + ".pdf"
+        pdf_value = pdf_base + (("; Attachments: " + ", ".join(valid_names)) if valid_names else "")
+        pdf = st.text_input("PDF", value=pdf_value)
+
+        comments = st.text_area("LeadComments / Customer Request", value=agent_data.get("LeadComments", ""), height=180)
+
+        st.subheader("Agent Decision")
+        st.write("Confidence:", agent_data.get("Confidence", ""))
+        st.write("Reason:", agent_data.get("AgentReason", ""))
 
         st.subheader("Attachment Decision")
         st.write("Valid customer attachments:")
@@ -405,13 +419,19 @@ if uploaded_file:
         st.write(parsed["ignored_attachments"] or "None")
 
         row = {h: "" for h in HEADER}
+        row["Product"] = product
         row["ReceivedDateTime"] = received
         row["FirstName"] = first
         row["LastName"] = last
         row["ContactTitle"] = title
         row["Email"] = email
         row["Company"] = company
-        row["LeadSource1"] = lead_source
+        row["Address"] = address
+        row["City"] = city
+        row["State"] = state
+        row["ZipCode"] = zip_code
+        row["Country"] = country
+        row["LeadSource1"] = "Email"
         row["LeadComments"] = comments
         row["PhoneSupplied"] = phone
         row["PDF"] = pdf
@@ -436,7 +456,7 @@ if uploaded_file:
             )
 
         with st.expander("Agent Evidence: extracted email text"):
-            st.text(parsed["body"][:15000])
+            st.text(parsed["body"][:18000])
 
     except Exception as e:
         st.error("Agent processing failed.")
