@@ -1,15 +1,17 @@
 import json
 import re
 import tempfile
+import zipfile
 from io import BytesIO
 from pathlib import Path
-import zipfile
 
 import streamlit as st
 from bs4 import BeautifulSoup
 from openpyxl import Workbook
 
+
 st.set_page_config(page_title="HYDAC Lead Agent", layout="wide")
+
 
 HEADER = [
     "Referral","Brand","Product","ReceivedDateTime","FirstName","LastName",
@@ -36,9 +38,9 @@ BAD_WEBSITE_PATTERNS = [
     "microsoft.com",
     "office.com",
     "outlook.com",
-    "mimecast",
-    "proofpoint",
     "safelinks",
+    "proofpoint",
+    "mimecast",
 ]
 
 SIGNATURE_IMAGE_NAMES = {
@@ -53,18 +55,20 @@ SIGNATURE_IMAGE_NAMES = {
     "image008.png", "image008.jpg", "image008.jpeg",
     "image009.png", "image009.jpg", "image009.jpeg",
     "image010.png", "image010.jpg", "image010.jpeg",
-    "logo.png", "logo.jpg", "facebook.png", "linkedin.png",
-    "twitter.png", "instagram.png", "youtube.png", "banner.png", "banner.jpg"
+    "logo.png", "logo.jpg", "banner.png", "banner.jpg",
+    "facebook.png", "linkedin.png", "twitter.png",
+    "instagram.png", "youtube.png"
 }
 
 VALID_ATTACHMENT_EXTENSIONS = {
     ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv",
     ".step", ".stp", ".igs", ".iges", ".dwg", ".dxf",
-    ".zip", ".rar", ".7z", ".png", ".jpg", ".jpeg", ".tif", ".tiff"
+    ".zip", ".rar", ".7z",
+    ".png", ".jpg", ".jpeg", ".tif", ".tiff"
 }
 
 
-def clean_text(text):
+def clean_text(text: str) -> str:
     if not text:
         return ""
     text = str(text).replace("\r", "\n")
@@ -74,30 +78,46 @@ def clean_text(text):
     return text.strip()
 
 
-def html_to_text(html):
+def html_to_text(html: str) -> str:
     if not html:
         return ""
     soup = BeautifulSoup(html, "html.parser")
     return clean_text(soup.get_text("\n"))
 
 
-def is_internal_email(email):
+def is_internal_email(email: str) -> bool:
     email = (email or "").lower()
-    return any(d in email for d in INTERNAL_DOMAINS)
+    return any(domain in email for domain in INTERNAL_DOMAINS)
 
 
-def split_name(name):
-    name = clean_text(name)
-    name = re.sub(r"<.*?>", "", name).strip(" '\"")
-    if not name:
-        return "", ""
-    parts = name.split()
-    if len(parts) == 1:
-        return parts[0], ""
-    return parts[0], " ".join(parts[1:])
+def extract_emails(text: str):
+    emails = re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text or "")
+    unique = []
+    for email in emails:
+        if email not in unique:
+            unique.append(email)
+    return unique
 
 
-def normalize_phone(phone):
+def extract_external_block(text: str) -> str:
+    """
+    If an email has an external warning block, the real customer message often starts nearby.
+    Return from EXTERNAL EMAIL marker onward, otherwise full text.
+    """
+    markers = [
+        "EXTERNAL EMAIL",
+        "External Email",
+        "CAUTION:",
+        "Caution:",
+    ]
+    for marker in markers:
+        idx = text.find(marker)
+        if idx != -1:
+            return text[idx:]
+    return text
+
+
+def normalize_phone(phone: str) -> str:
     phone = (phone or "").strip()
     phone = phone.replace("+", "")
     phone = re.sub(r"[().\s]+", "", phone)
@@ -105,41 +125,7 @@ def normalize_phone(phone):
     return phone
 
 
-def extract_emails(text):
-    found = re.findall(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", text or "")
-    unique = []
-    for e in found:
-        if e not in unique:
-            unique.append(e)
-    return unique
-
-
-def extract_websites(text):
-    found = re.findall(r"(?:www\.|https?://)[A-Za-z0-9.\-]+\.[A-Za-z]{2,}(?:/[^\s<>()]*)?", text or "")
-    out = []
-    for site in found:
-        site = site.rstrip(".,;)")
-        site = site.replace("https://", "").replace("http://", "")
-        low = site.lower()
-        if any(bad in low for bad in BAD_WEBSITE_PATTERNS):
-            continue
-        if site not in out:
-            out.append(site)
-    return out
-
-
-def extract_phones(text):
-    candidates = re.findall(r"(?:\+?\d[\d\s().\-]{7,}\d)", text or "")
-    out = []
-    for c in candidates:
-        n = normalize_phone(c)
-        digits = re.sub(r"\D", "", n)
-        if len(digits) >= 8 and n not in out:
-            out.append(n)
-    return out[:4]
-
-
-def looks_like_valid_attachment(filename):
+def looks_like_valid_attachment(filename: str) -> bool:
     if not filename:
         return False
 
@@ -159,10 +145,14 @@ def looks_like_valid_attachment(filename):
     if ext not in {".png", ".jpg", ".jpeg", ".gif"}:
         return True
 
+    # For image attachments, keep only if the filename looks specific to the customer/request.
     if re.search(r"\d{4,}", name):
         return True
 
-    if re.search(r"(pump|filter|drawing|label|plate|model|part|bieri|hydraulic|spec|quote|rfbn)", low):
+    if re.search(
+        r"(pump|filter|drawing|label|plate|model|part|bieri|hydraulic|spec|quote|rfbn|serial|nameplate)",
+        low,
+    ):
         return True
 
     return False
@@ -186,6 +176,7 @@ def parse_msg(uploaded_file):
         body = html_to_text(msg.htmlBody)
 
     full_text = clean_text("\n".join([sender, subject, body]))
+    external_focus_text = clean_text(extract_external_block(full_text))
 
     valid_attachments = []
     ignored_attachments = []
@@ -194,6 +185,7 @@ def parse_msg(uploaded_file):
         fname = getattr(att, "longFilename", None) or getattr(att, "shortFilename", None) or ""
         if not fname:
             continue
+
         if looks_like_valid_attachment(fname):
             valid_attachments.append((fname, att))
         else:
@@ -205,88 +197,99 @@ def parse_msg(uploaded_file):
         "date": date,
         "body": body,
         "full_text": full_text,
+        "external_focus_text": external_focus_text,
         "valid_attachments": valid_attachments,
         "ignored_attachments": ignored_attachments,
     }
 
 
 def fallback_agent(parsed):
-    text = parsed["full_text"]
-
-    emails = extract_emails(text)
-    customer_email = ""
-    for email in emails:
-        if not is_internal_email(email):
-            customer_email = email
-            break
+    """
+    Minimal fallback when no OpenAI key is present.
+    It is intentionally conservative and expects manual review.
+    """
+    focus = parsed["external_focus_text"]
+    emails = [e for e in extract_emails(focus) if not is_internal_email(e)]
+    email = emails[0] if emails else ""
 
     first = ""
     last = ""
-    if customer_email:
-        guess = customer_email.split("@")[0].replace(".", " ").replace("_", " ").title()
-        first, last = split_name(guess)
-
-    phones = extract_phones(text)
-    websites = extract_websites(text)
-
-    request = parsed["body"][:2000]
-    request = clean_text(request)
+    if email:
+        name_guess = email.split("@")[0].replace(".", " ").replace("_", " ").title()
+        parts = name_guess.split()
+        first = parts[0] if parts else ""
+        last = " ".join(parts[1:]) if len(parts) > 1 else ""
 
     return {
         "FirstName": first,
         "LastName": last,
         "ContactTitle": "",
-        "Email": customer_email,
+        "Email": email,
         "Company": "",
         "Address": "",
         "City": "",
         "State": "",
         "ZipCode": "",
         "Country": "",
-        "PhoneSupplied": " : ".join(phones),
-        "WebAddress": websites[0] if websites else "",
-        "LeadComments": request,
+        "PhoneSupplied": "",
+        "WebAddress": "",
+        "LeadComments": focus[:1200],
         "Product": "",
         "Confidence": "Low",
-        "AgentReason": "Fallback rule mode. Add OpenAI API key for better customer understanding."
+        "AgentReason": "Fallback mode. Add OPENAI_API_KEY in Streamlit Secrets for agent understanding."
     }
 
 
-def ai_agent(parsed, uploaded_name, valid_attachment_names):
+def run_ai_agent(parsed, uploaded_name, valid_attachment_names):
     api_key = st.secrets.get("OPENAI_API_KEY", "")
 
     if not api_key:
         return fallback_agent(parsed)
 
     from openai import OpenAI
+
     client = OpenAI(api_key=api_key)
 
-    email_text = parsed["full_text"][:18000]
+    email_text = parsed["full_text"][:22000]
+    focus_text = parsed["external_focus_text"][:12000]
 
     prompt = f"""
-You are a lead-processing agent for HYDAC.
+You are a HYDAC lead-processing AGENT. You are not a simple extractor.
 
-Your task is NOT simple extraction. You must understand the email trail and identify the real external customer/requester.
+Your job:
+Read the full email and identify the real external customer/requester and customer request.
 
-Important rules:
-1. Do not choose HYDAC employees, HYDAC Sales, HYDAC USA, or internal forwarders as the customer.
-2. If the email was forwarded by HYDAC, find the original outside customer who made the request.
-3. Ignore Microsoft security warnings, disclaimers, banners, and signatures.
-4. Ignore generic signature images such as image.png or image001.png.
-5. Customer request/LeadComments should be the actual customer request text, not a generic summary, when the request is clear.
-6. Split names into FirstName and LastName.
-7. PhoneSupplied format should be phone1 : phone2, with +, spaces, brackets removed, e.g. 43-31669151 : 43-6649614266.
-8. Leave fields blank if not available. Do not guess.
-9. Use signature block for company/title/address/phone when available.
-10. If confidence is low, explain why.
+CRITICAL RULES:
+1. Do NOT select HYDAC employees, HYDAC Sales, internal forwarders, or HYDAC signatures as the lead.
+2. If HYDAC forwarded the email, find the original outside customer.
+3. If there is an EXTERNAL EMAIL / caution block, strongly prefer the customer info and request inside or below that block.
+4. Ignore Microsoft security warnings, Outlook banners, confidentiality footers, and sender-identification links.
+5. Ignore HYDAC phone numbers and HYDAC signature contact data.
+6. Customer phone must come from the outside customer signature only. If only HYDAC phone is found, leave PhoneSupplied blank.
+7. LeadComments must be only the actual customer request, not the full email trail.
+8. If the customer request is clear and short, keep the exact wording as much as possible.
+9. Split person name into FirstName and LastName.
+10. PhoneSupplied format:
+   - Remove +, spaces, parentheses, and periods.
+   - Keep hyphens when useful.
+   - Multiple customer numbers separated by " : "
+   - Example: 43-31669151 : 43-6649614266
+11. Use the customer signature block for company, title, address, city, state, zip, country, phone, website.
+12. Leave blank if not available. Do not guess.
+13. For BIERI example, Greg Jia / Klein International Inc. is the customer, not HYDAC or Brandon.
+14. Company should not be inferred from Gmail unless written in the signature/body.
+15. Product should contain product/model/part number only if clearly present.
 
 Valid customer attachments already detected:
 {valid_attachment_names}
 
-Email file name:
+Uploaded file name:
 {uploaded_name}
 
-Email text:
+Focused external/customer block:
+{focus_text}
+
+Full email text:
 {email_text}
 
 Return ONLY valid JSON with these exact keys:
@@ -299,7 +302,10 @@ PhoneSupplied, WebAddress, LeadComments, Product, Confidence, AgentReason
             model="gpt-4o-mini",
             temperature=0,
             messages=[
-                {"role": "system", "content": "You are a careful lead processing agent. Return only valid JSON."},
+                {
+                    "role": "system",
+                    "content": "You are a careful lead-processing agent. Return only valid JSON. Never guess unavailable fields."
+                },
                 {"role": "user", "content": prompt},
             ],
         )
@@ -309,11 +315,11 @@ PhoneSupplied, WebAddress, LeadComments, Product, Confidence, AgentReason
         data = json.loads(content)
 
         required = [
-            "FirstName", "LastName", "ContactTitle", "Email", "Company", "Address",
-            "City", "State", "ZipCode", "Country", "PhoneSupplied", "WebAddress",
-            "LeadComments", "Product", "Confidence", "AgentReason"
+            "FirstName", "LastName", "ContactTitle", "Email", "Company",
+            "Address", "City", "State", "ZipCode", "Country",
+            "PhoneSupplied", "WebAddress", "LeadComments", "Product",
+            "Confidence", "AgentReason"
         ]
-
         for key in required:
             data.setdefault(key, "")
 
@@ -329,6 +335,7 @@ def make_excel(row):
     wb = Workbook()
     ws = wb.active
     ws.title = "Leads"
+
     ws.append(HEADER)
     ws.append([row.get(h, "") for h in HEADER])
 
@@ -358,26 +365,22 @@ def make_attachment_zip(valid_attachments):
     return output.getvalue()
 
 
-st.title("HYDAC Lead Agent")
-st.success("Step 5 running: AI customer understanding enabled.")
+st.title("HYDAC Lead Agent V1")
+st.success("Agent is running.")
 
-with st.expander("How this agent works"):
-    st.write(
-        "The agent reads the email trail, avoids HYDAC/internal forwarders, "
-        "identifies the real outside customer, classifies attachments, and lets you review before Excel export."
-    )
+with st.expander("Agent status"):
     if st.secrets.get("OPENAI_API_KEY", ""):
-        st.success("OpenAI API key detected. AI understanding mode is active.")
+        st.success("AI mode active: OPENAI_API_KEY detected.")
     else:
-        st.warning("No OpenAI API key detected. App will run in fallback/manual-review mode.")
+        st.warning("Fallback/manual mode: add OPENAI_API_KEY in Streamlit Secrets for best results.")
 
-uploaded_file = st.file_uploader("Upload MSG file", type=["msg"])
+uploaded_file = st.file_uploader("Upload .msg file", type=["msg"])
 
 if uploaded_file:
     try:
         parsed = parse_msg(uploaded_file)
         valid_names = [name for name, _ in parsed["valid_attachments"]]
-        agent_data = ai_agent(parsed, uploaded_file.name, valid_names)
+        agent_data = run_ai_agent(parsed, uploaded_file.name, valid_names)
 
         st.subheader("Agent Review Panel")
 
@@ -406,7 +409,11 @@ if uploaded_file:
         pdf_value = pdf_base + (("; Attachments: " + ", ".join(valid_names)) if valid_names else "")
         pdf = st.text_input("PDF", value=pdf_value)
 
-        comments = st.text_area("LeadComments / Customer Request", value=agent_data.get("LeadComments", ""), height=180)
+        comments = st.text_area(
+            "LeadComments / Customer Request",
+            value=agent_data.get("LeadComments", ""),
+            height=180
+        )
 
         st.subheader("Agent Decision")
         st.write("Confidence:", agent_data.get("Confidence", ""))
@@ -415,6 +422,7 @@ if uploaded_file:
         st.subheader("Attachment Decision")
         st.write("Valid customer attachments:")
         st.write(valid_names or "None")
+
         st.write("Ignored signature/generic attachments:")
         st.write(parsed["ignored_attachments"] or "None")
 
@@ -455,8 +463,11 @@ if uploaded_file:
                 mime="application/zip",
             )
 
-        with st.expander("Agent Evidence: extracted email text"):
-            st.text(parsed["body"][:18000])
+        with st.expander("Agent Evidence: focused external/customer block"):
+            st.text(parsed["external_focus_text"][:12000])
+
+        with st.expander("Full extracted email text"):
+            st.text(parsed["body"][:22000])
 
     except Exception as e:
         st.error("Agent processing failed.")
