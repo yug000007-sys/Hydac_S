@@ -3,3 +3,4 @@ openpyxl
 extract-msg
 beautifulsoup4
 openai
+Pillow
