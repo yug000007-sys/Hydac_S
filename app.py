@@ -406,14 +406,7 @@ def format_search_results(results: List[Dict]) -> str:
     return "\n\n".join(parts)
 
 
-def format_search_results(results: List[Dict]) -> str:
-    parts = []
-    for i, r in enumerate(results, 1):
-        parts.append(f"[{i}] {r['title']}\n{r['url']}\n{r['body']}")
-    return "\n\n".join(parts)
-
-
-def run_research(lead: Dict, provider: str, api_key: str = "") -> tuple:
+def run_research(lead: Dict, provider: str, api_key: str = "", tavily_key: str = "") -> tuple:
     """Run web searches about the company and contact, then use AI to synthesise results.
     Returns (result_dict, search_debug_text)."""
     company   = lead.get("Company", "").strip()
@@ -441,7 +434,7 @@ def run_research(lead: Dict, provider: str, api_key: str = "") -> tuple:
     search_debug   = ""
 
     # ── Try Tavily first (works on Streamlit Cloud, free tier) ────────────
-    tavily_key = st.secrets.get("TAVILY_API_KEY", "")
+    tavily_key = tavily_key or st.secrets.get("TAVILY_API_KEY", "")
     if tavily_key:
         try:
             parts = []
@@ -576,6 +569,10 @@ def field_row(label: str, value: str, key: str, multiline: bool = False) -> str:
 
 st.title("⚙️ HYDAC Lead Agent")
 st.caption("Upload a .msg file — the agent reads it and gives you a clean lead card ready to export.")
+
+# Default values — overwritten inside sidebar block
+api_key    = ""
+tavily_key = st.secrets.get("TAVILY_API_KEY", "")
 
 # Sidebar: API keys + provider
 with st.sidebar:
@@ -832,7 +829,7 @@ if uploaded_file and ready:
         if research_btn:
             with st.spinner("Searching the web and analysing results…"):
                 try:
-                    research, search_debug = run_research(result, provider, api_key)
+                    research, search_debug = run_research(result, provider, api_key, tavily_key=tavily_key)
                     st.session_state.search_debug = search_debug
                     # Merge all research fields into session result
                     RESEARCH_FIELDS = [
@@ -919,5 +916,3 @@ if uploaded_file and ready:
         if st.session_state.get("search_debug"):
             with st.expander("🔍 Raw search results (debug)"):
                 st.text(st.session_state.search_debug[:8000])
-
-
