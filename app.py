@@ -127,6 +127,10 @@ def parse_msg(uploaded_file) -> Dict:
             if d["decision"] == "Keep":
                 kept_attachments.append(d)
 
+    # Generate lead PDF from kept attachments
+    lead_pdf = make_lead_pdf(kept_attachments, date) if kept_attachments else None
+    pdf_name = lead_pdf[1] if lead_pdf else ""
+
     return {
         "sender": sender,
         "subject": subject,
@@ -136,6 +140,8 @@ def parse_msg(uploaded_file) -> Dict:
         "attachment_decisions": attachment_decisions,
         "kept_attachments": kept_attachments,
         "valid_attachment_names": [d["filename"] for d in attachment_decisions if d["decision"] == "Keep"],
+        "lead_pdf_bytes": lead_pdf[0] if lead_pdf else None,
+        "lead_pdf_name": pdf_name,
     }
 
 # ── Agent system prompt ────────────────────────────────────────────────────────
@@ -325,6 +331,65 @@ def make_attachment_zip(kept: List[Dict]) -> Optional[bytes]:
             except Exception:
                 pass
     return out.getvalue()
+
+# ── Lead PDF generator ────────────────────────────────────────────────────────
+
+def make_pdf_name(date_str: str) -> str:
+    """Generate unique PDF name: hydac + MDDYYYY + HHMM from email date string."""
+    import re
+    # date_str examples: "2026-06-11 12:51:51+00:00" or "2026-06-11 12:51:51"
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2})", date_str or "")
+    if m:
+        year, month, day, hour, minute = m.groups()
+        return f"hydac{int(month)}{day}{year}{hour}{minute}.pdf"
+    import time
+    t = time.localtime()
+    return f"hydac{t.tm_mon}{t.tm_mday:02d}{t.tm_year}{t.tm_hour:02d}{t.tm_min:02d}.pdf"
+
+
+def make_lead_pdf(kept_attachments: List[Dict], date_str: str = "") -> Optional[tuple]:
+    """Bundle all kept images + non-image attachments into a single PDF.
+    Returns (pdf_bytes, pdf_filename) or None if nothing to bundle."""
+    try:
+        from PIL import Image as PILImage
+        import io
+    except ImportError:
+        return None
+
+    pdf_name = make_pdf_name(date_str)
+    images_for_pdf = []
+    non_image_pages = []
+
+    for d in kept_attachments:
+        try:
+            data = d["obj"].data
+            if not data:
+                continue
+            ext = Path(d["filename"]).suffix.lower()
+
+            if ext in {".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"}:
+                img = PILImage.open(io.BytesIO(data)).convert("RGB")
+                images_for_pdf.append(img)
+            elif ext == ".pdf":
+                # Embed raw PDF pages as images via pdf2image if available, else skip
+                try:
+                    from pdf2image import convert_from_bytes
+                    pages = convert_from_bytes(data, dpi=150)
+                    images_for_pdf.extend([p.convert("RGB") for p in pages])
+                except Exception:
+                    pass  # pdf2image not installed — skip PDF attachments
+        except Exception:
+            continue
+
+    if not images_for_pdf:
+        return None
+
+    out = BytesIO()
+    first = images_for_pdf[0]
+    rest  = images_for_pdf[1:] if len(images_for_pdf) > 1 else []
+    first.save(out, format="PDF", save_all=True, append_images=rest, resolution=150)
+    return out.getvalue(), pdf_name
+
 
 # ── Research engine ────────────────────────────────────────────────────────────
 
@@ -711,9 +776,11 @@ if uploaded_file and ready:
                 # Inject fields the AI doesn't produce
                 result["ReceivedDateTime"] = parsed["date"]
                 result["LeadSource1"] = "Email"
-                result["PDF"] = Path(uploaded_file.name).with_suffix(".pdf").name
-                if parsed["valid_attachment_names"]:
-                    result["PDF"] += "; Attachments: " + ", ".join(parsed["valid_attachment_names"])
+                # Use auto-generated PDF name if we bundled attachments, else fallback
+                if parsed.get("lead_pdf_name"):
+                    result["PDF"] = parsed["lead_pdf_name"]
+                else:
+                    result["PDF"] = Path(uploaded_file.name).with_suffix(".pdf").name
                 st.session_state.result = result
             except Exception as e:
                 st.error(f"Agent failed: {e}")
@@ -830,16 +897,14 @@ if uploaded_file and ready:
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
 
-        if parsed and parsed.get("kept_attachments"):
-            zip_bytes = make_attachment_zip(parsed["kept_attachments"])
-            if zip_bytes:
-                with zip_col:
-                    st.download_button(
-                        "📎 Download Attachments ZIP",
-                        data=zip_bytes,
-                        file_name="attachments.zip",
-                        mime="application/zip",
-                    )
+        if parsed and parsed.get("lead_pdf_bytes"):
+            with zip_col:
+                st.download_button(
+                    "📄 Download Lead PDF",
+                    data=parsed["lead_pdf_bytes"],
+                    file_name=parsed.get("lead_pdf_name", "lead.pdf"),
+                    mime="application/pdf",
+                )
 
         # ── Research section ──────────────────────────────────────────────────
         st.divider()
@@ -941,5 +1006,3 @@ if uploaded_file and ready:
         if st.session_state.get("search_debug"):
             with st.expander("🔍 Raw search results (debug)"):
                 st.text(st.session_state.search_debug[:8000])
-
-
