@@ -198,6 +198,16 @@ No markdown, no preamble, no explanation outside the JSON."""
 # ── AI call ────────────────────────────────────────────────────────────────────
 
 def run_agent(email_text: str, provider: str, api_key: str = "") -> Dict:
+    # Always re-read from secrets in case sidebar variable is stale
+    if provider == "groq":
+        api_key = api_key or st.secrets.get("GROQ_API_KEY", "")
+    elif provider == "claude":
+        api_key = api_key or st.secrets.get("ANTHROPIC_API_KEY", "")
+    elif provider == "openai":
+        api_key = api_key or st.secrets.get("OPENAI_API_KEY", "")
+    elif provider == "gemini":
+        api_key = api_key or st.secrets.get("GEMINI_API_KEY", "")
+
     user_prompt = f"""Extract the lead from this email thread:
 
 {email_text[:12000]}"""
@@ -409,6 +419,17 @@ def format_search_results(results: List[Dict]) -> str:
 def run_research(lead: Dict, provider: str, api_key: str = "", tavily_key: str = "") -> tuple:
     """Run web searches about the company and contact, then use AI to synthesise results.
     Returns (result_dict, search_debug_text)."""
+    # Always re-read keys from secrets in case sidebar variable is stale
+    if provider == "groq":
+        api_key = api_key or st.secrets.get("GROQ_API_KEY", "")
+    elif provider == "claude":
+        api_key = api_key or st.secrets.get("ANTHROPIC_API_KEY", "")
+    elif provider == "openai":
+        api_key = api_key or st.secrets.get("OPENAI_API_KEY", "")
+    elif provider == "gemini":
+        api_key = api_key or st.secrets.get("GEMINI_API_KEY", "")
+    tavily_key = tavily_key or st.secrets.get("TAVILY_API_KEY", "")
+
     company   = lead.get("Company", "").strip()
     firstname = lead.get("FirstName", "").strip()
     lastname  = lead.get("LastName", "").strip()
