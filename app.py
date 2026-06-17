@@ -124,16 +124,14 @@ def make_pdf_name(date_str: str) -> str:
 
 def make_lead_pdf(kept_attachments: List[Dict], date_str: str = "") -> Optional[tuple]:
     """Bundle all kept images into a single PDF.
+    Tries Pillow first; falls back to a raw JPEG-in-PDF wrapper (no extra packages).
     Returns (pdf_bytes, pdf_filename) or None if nothing to bundle."""
-    try:
-        from PIL import Image as PILImage
-        import io as _io
-    except ImportError:
-        return None
+    import io as _io
 
     pdf_name = make_pdf_name(date_str)
-    images_for_pdf = []
 
+    # Collect raw image bytes + filenames
+    image_items = []
     for d in kept_attachments:
         try:
             data = d["obj"].data
@@ -141,19 +139,145 @@ def make_lead_pdf(kept_attachments: List[Dict], date_str: str = "") -> Optional[
                 continue
             ext = Path(d["filename"]).suffix.lower()
             if ext in {".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"}:
-                img = PILImage.open(_io.BytesIO(data)).convert("RGB")
-                images_for_pdf.append(img)
+                image_items.append((d["filename"], data))
         except Exception:
             continue
 
-    if not images_for_pdf:
+    if not image_items:
         return None
 
-    out = BytesIO()
-    first = images_for_pdf[0]
-    rest  = images_for_pdf[1:]
-    first.save(out, format="PDF", save_all=True, append_images=rest, resolution=150)
-    return out.getvalue(), pdf_name
+    # ── Try Pillow (best quality) ──────────────────────────────────────────
+    try:
+        from PIL import Image as PILImage
+        images_for_pdf = []
+        for fname, data in image_items:
+            img = PILImage.open(_io.BytesIO(data)).convert("RGB")
+            images_for_pdf.append(img)
+        out = BytesIO()
+        images_for_pdf[0].save(
+            out, format="PDF", save_all=True,
+            append_images=images_for_pdf[1:], resolution=150
+        )
+        return out.getvalue(), pdf_name
+    except Exception:
+        pass  # Pillow not installed or failed — use fallback
+
+    # ── Fallback: wrap each JPEG directly into a minimal PDF ──────────────
+    # Converts PNG/other to JPEG-compatible bytes first using struct
+    try:
+        def _to_jpeg_bytes(raw: bytes) -> Optional[bytes]:
+            """Return JPEG bytes from any image format using Pillow if available,
+            or return raw bytes if already JPEG."""
+            if raw[:2] == b"\xff\xd8":
+                return raw  # already JPEG
+            try:
+                from PIL import Image as _PI
+                buf = _io.BytesIO()
+                _PI.open(_io.BytesIO(raw)).convert("RGB").save(buf, format="JPEG", quality=85)
+                return buf.getvalue()
+            except Exception:
+                return raw if raw[:2] == b"\xff\xd8" else None
+
+        pdf_parts = []
+        xref_offsets = []
+        obj_count = 0
+
+        # PDF header
+        pdf_parts.append(b"%PDF-1.4\n")
+
+        page_obj_ids = []
+        image_obj_ids = []
+
+        for fname, raw_data in image_items:
+            jpg = _to_jpeg_bytes(raw_data)
+            if not jpg:
+                continue
+
+            # Try to get image dimensions
+            w, h = 595, 842  # A4 default
+            try:
+                from PIL import Image as _PI2
+                im = _PI2.open(_io.BytesIO(raw_data))
+                w, h = im.size
+                # Scale to fit A4 width (595pt) if wider
+                if w > 595:
+                    h = int(h * 595 / w)
+                    w = 595
+            except Exception:
+                pass
+
+            obj_count += 1; img_id = obj_count
+            obj_count += 1; page_id = obj_count
+
+            image_obj_ids.append((img_id, jpg, w, h))
+            page_obj_ids.append((page_id, img_id, w, h))
+
+        if not image_obj_ids:
+            return None
+
+        obj_count += 1; pages_id = obj_count
+        obj_count += 1; catalog_id = obj_count
+
+        # Write image + page objects
+        body = b""
+        xrefs = {}
+
+        for img_id, jpg, w, h in image_obj_ids:
+            xrefs[img_id] = len(pdf_parts[0]) + len(body)
+            body += (
+                f"{img_id} 0 obj\n"
+                f"<</Type /XObject /Subtype /Image /Width {w} /Height {h} "
+                f"/ColorSpace /DeviceRGB /BitsPerComponent 8 "
+                f"/Filter /DCTDecode /Length {len(jpg)}>>\nstream\n"
+            ).encode() + jpg + b"\nendstream\nendobj\n"
+
+        for page_id, img_id, w, h in page_obj_ids:
+            xrefs[page_id] = len(pdf_parts[0]) + len(body)
+            content_stream = f"q {w} 0 0 {h} 0 0 cm /Im{img_id} Do Q".encode()
+            body += (
+                f"{page_id} 0 obj\n"
+                f"<</Type /Page /Parent {pages_id} 0 R "
+                f"/MediaBox [0 0 {w} {h}] "
+                f"/Resources <</XObject <</Im{img_id} {img_id} 0 R>>>> "
+                f"/Contents {page_id+100} 0 R>>\nendobj\n"
+            ).encode()
+            # Content stream object
+            xrefs[page_id + 100] = len(pdf_parts[0]) + len(body)
+            body += (
+                f"{page_id+100} 0 obj\n"
+                f"<</Length {len(content_stream)}>>\nstream\n"
+            ).encode() + content_stream + b"\nendstream\nendobj\n"
+
+        # Pages object
+        kids = " ".join(f"{pid} 0 R" for pid, *_ in page_obj_ids)
+        xrefs[pages_id] = len(pdf_parts[0]) + len(body)
+        body += (
+            f"{pages_id} 0 obj\n"
+            f"<</Type /Pages /Kids [{kids}] /Count {len(page_obj_ids)}>>\nendobj\n"
+        ).encode()
+
+        # Catalog
+        xrefs[catalog_id] = len(pdf_parts[0]) + len(body)
+        body += (
+            f"{catalog_id} 0 obj\n"
+            f"<</Type /Catalog /Pages {pages_id} 0 R>>\nendobj\n"
+        ).encode()
+
+        xref_pos = len(pdf_parts[0]) + len(body)
+        all_ids = sorted(xrefs.keys())
+        xref_table = f"xref\n0 1\n0000000000 65535 f \n{len(all_ids)+1} {max(all_ids)}\n"
+        for oid in all_ids:
+            xref_table += f"{xrefs[oid]:010d} 00000 n \n"
+
+        trailer = (
+            f"trailer\n<</Size {max(all_ids)+1} /Root {catalog_id} 0 R>>\n"
+            f"startxref\n{xref_pos}\n%%EOF\n"
+        )
+
+        return pdf_parts[0] + body + xref_table.encode() + trailer.encode(), pdf_name
+
+    except Exception:
+        return None
 
 
 def parse_msg(uploaded_file) -> Dict:
@@ -825,7 +949,16 @@ if uploaded_file and ready:
             if result.get("Quantity"):
                 st.markdown(f"**Qty:** {result['Quantity']}")
             comments = result.get("LeadComments","")
-            st.markdown(comments[:400] + ("…" if len(comments) > 400 else "") if comments else "—")
+            if comments:
+                # Convert HTML tags to markdown for display
+                display = re.sub(r"<br\s*/?>", "\n", comments, flags=re.I)
+                display = re.sub(r"<b>(.*?)</b>", r"**\1**", display, flags=re.I)
+                display = re.sub(r"<[^>]+>", "", display)
+                display = re.sub(r"<[^>]+>", "", display)  # strip any remaining tags
+                display = display[:500] + ("…" if len(display) > 500 else "")
+                st.markdown(display)
+            else:
+                st.markdown("—")
 
         if result.get("Summary"):
             st.markdown("#### 📋 Email Summary")
