@@ -1135,8 +1135,15 @@ if uploaded_file and ready:
         with st.expander("Raw email text (debug)"):
             st.text(parsed["full_text"][:15000] if parsed else "")
 
+        if parsed:
+            with st.expander("📎 Attachment debug"):
+                st.write(f"**Total attachments:** {len(parsed.get('attachment_decisions', []))}")
+                st.write(f"**Kept:** {len(parsed.get('kept_attachments', []))}")
+                st.write(f"**PDF generated:** {bool(parsed.get('lead_pdf_bytes'))}")
+                st.write(f"**PDF name:** {parsed.get('lead_pdf_name', 'none')}")
+                for d in parsed.get("attachment_decisions", []):
+                    st.write(f"- `{d['filename']}` -> **{d['decision']}** ({d['reason']})")
+
         if st.session_state.get("search_debug"):
             with st.expander("🔍 Raw search results (debug)"):
                 st.text(st.session_state.search_debug[:8000])
-
-
