@@ -92,8 +92,9 @@ def decide_attachment(filename: str, attachment_obj=None, subject: str = ""):
         return {"filename": name, "decision": "Reject", "reason": f"Unsupported extension {ext or '(none)'}"}
     if low in SIGNATURE_IMAGE_NAMES:
         return {"filename": name, "decision": "Reject", "reason": "Signature/logo image"}
-    # Generic image name (e.g. image004.jpg) — keep if subject looks like an RFQ/product email
-    if re.fullmatch(r"image\d{0,3}\.(png|jpg|jpeg|gif|tif|tiff)", low):
+    # Generic image name (e.g. image004.jpg, image004(timestamp).jpg) —
+    # keep if subject looks like an RFQ/product email, otherwise reject
+    if re.match(r"image[\d(]", low) and ext in IMAGE_EXTENSIONS:
         subject_is_rfq = bool(re.search(
             r"(?i)(rfq|quote|inquiry|request|part|bieri|hydac|filter|pump|drawing|spec)",
             subject or ""
@@ -101,6 +102,9 @@ def decide_attachment(filename: str, attachment_obj=None, subject: str = ""):
         if subject_is_rfq:
             return {"filename": name, "decision": "Keep", "reason": "Inline product image (RFQ email)", "obj": attachment_obj}
         return {"filename": name, "decision": "Reject", "reason": "Generic inline signature image"}
+    # Plain "image.png" / "image.jpg" with no number — always reject (signature logo)
+    if re.fullmatch(r"image\.(png|jpg|jpeg|gif|tif|tiff)", low):
+        return {"filename": name, "decision": "Reject", "reason": "Signature/logo image"}
     if ext not in IMAGE_EXTENSIONS:
         return {"filename": name, "decision": "Keep", "reason": "Document/CAD/spreadsheet attachment", "obj": attachment_obj}
     if re.search(r"\d{4,}", name):
