@@ -82,7 +82,7 @@ def strip_icon_prefixes(text: str) -> str:
     """Remove inline icon image URL prefixes from every line (common in HTML signatures)."""
     return "\n".join(_ICON_PREFIX_RE.sub("", line) for line in text.splitlines())
 
-def decide_attachment(filename: str, attachment_obj=None):
+def decide_attachment(filename: str, attachment_obj=None, subject: str = ""):
     if not filename:
         return {"filename": "", "decision": "Reject", "reason": "Blank filename"}
     name = Path(filename).name
@@ -92,15 +92,69 @@ def decide_attachment(filename: str, attachment_obj=None):
         return {"filename": name, "decision": "Reject", "reason": f"Unsupported extension {ext or '(none)'}"}
     if low in SIGNATURE_IMAGE_NAMES:
         return {"filename": name, "decision": "Reject", "reason": "Signature/logo image"}
+    # Generic image name (e.g. image004.jpg) — keep if subject looks like an RFQ/product email
     if re.fullmatch(r"image\d{0,3}\.(png|jpg|jpeg|gif|tif|tiff)", low):
+        subject_is_rfq = bool(re.search(
+            r"(?i)(rfq|quote|inquiry|request|part|bieri|hydac|filter|pump|drawing|spec)",
+            subject or ""
+        ))
+        if subject_is_rfq:
+            return {"filename": name, "decision": "Keep", "reason": "Inline product image (RFQ email)", "obj": attachment_obj}
         return {"filename": name, "decision": "Reject", "reason": "Generic inline signature image"}
     if ext not in IMAGE_EXTENSIONS:
         return {"filename": name, "decision": "Keep", "reason": "Document/CAD/spreadsheet attachment", "obj": attachment_obj}
     if re.search(r"\d{4,}", name):
         return {"filename": name, "decision": "Keep", "reason": "Image has part/model number", "obj": attachment_obj}
-    if re.search(r"(?i)(pump|filter|drawing|label|plate|model|part|hydraulic|spec|quote|serial)", name):
+    if re.search(r"(?i)(pump|filter|drawing|label|plate|model|part|hydraulic|spec|quote|serial|bieri)", name):
         return {"filename": name, "decision": "Keep", "reason": "Image has product keyword", "obj": attachment_obj}
     return {"filename": name, "decision": "Reject", "reason": "Image not customer evidence"}
+
+# ── Lead PDF generator ────────────────────────────────────────────────────────
+
+def make_pdf_name(date_str: str) -> str:
+    """Generate unique PDF name: hydac + MDDYYYY + HHMM from email date string."""
+    m = re.search(r"(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2})", date_str or "")
+    if m:
+        year, month, day, hour, minute = m.groups()
+        return f"hydac{int(month)}{day}{year}{hour}{minute}.pdf"
+    import time
+    t = time.localtime()
+    return f"hydac{t.tm_mon}{t.tm_mday:02d}{t.tm_year}{t.tm_hour:02d}{t.tm_min:02d}.pdf"
+
+
+def make_lead_pdf(kept_attachments: List[Dict], date_str: str = "") -> Optional[tuple]:
+    """Bundle all kept images into a single PDF.
+    Returns (pdf_bytes, pdf_filename) or None if nothing to bundle."""
+    try:
+        from PIL import Image as PILImage
+        import io as _io
+    except ImportError:
+        return None
+
+    pdf_name = make_pdf_name(date_str)
+    images_for_pdf = []
+
+    for d in kept_attachments:
+        try:
+            data = d["obj"].data
+            if not data:
+                continue
+            ext = Path(d["filename"]).suffix.lower()
+            if ext in {".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"}:
+                img = PILImage.open(_io.BytesIO(data)).convert("RGB")
+                images_for_pdf.append(img)
+        except Exception:
+            continue
+
+    if not images_for_pdf:
+        return None
+
+    out = BytesIO()
+    first = images_for_pdf[0]
+    rest  = images_for_pdf[1:]
+    first.save(out, format="PDF", save_all=True, append_images=rest, resolution=150)
+    return out.getvalue(), pdf_name
+
 
 def parse_msg(uploaded_file) -> Dict:
     import extract_msg
@@ -122,7 +176,7 @@ def parse_msg(uploaded_file) -> Dict:
     for att in msg.attachments:
         fname = getattr(att, "longFilename", None) or getattr(att, "shortFilename", None) or ""
         if fname:
-            d = decide_attachment(fname, att)
+            d = decide_attachment(fname, att, subject=subject)
             attachment_decisions.append(d)
             if d["decision"] == "Keep":
                 kept_attachments.append(d)
@@ -331,65 +385,6 @@ def make_attachment_zip(kept: List[Dict]) -> Optional[bytes]:
             except Exception:
                 pass
     return out.getvalue()
-
-# ── Lead PDF generator ────────────────────────────────────────────────────────
-
-def make_pdf_name(date_str: str) -> str:
-    """Generate unique PDF name: hydac + MDDYYYY + HHMM from email date string."""
-    import re
-    # date_str examples: "2026-06-11 12:51:51+00:00" or "2026-06-11 12:51:51"
-    m = re.search(r"(\d{4})-(\d{2})-(\d{2})[\sT](\d{2}):(\d{2})", date_str or "")
-    if m:
-        year, month, day, hour, minute = m.groups()
-        return f"hydac{int(month)}{day}{year}{hour}{minute}.pdf"
-    import time
-    t = time.localtime()
-    return f"hydac{t.tm_mon}{t.tm_mday:02d}{t.tm_year}{t.tm_hour:02d}{t.tm_min:02d}.pdf"
-
-
-def make_lead_pdf(kept_attachments: List[Dict], date_str: str = "") -> Optional[tuple]:
-    """Bundle all kept images + non-image attachments into a single PDF.
-    Returns (pdf_bytes, pdf_filename) or None if nothing to bundle."""
-    try:
-        from PIL import Image as PILImage
-        import io
-    except ImportError:
-        return None
-
-    pdf_name = make_pdf_name(date_str)
-    images_for_pdf = []
-    non_image_pages = []
-
-    for d in kept_attachments:
-        try:
-            data = d["obj"].data
-            if not data:
-                continue
-            ext = Path(d["filename"]).suffix.lower()
-
-            if ext in {".png", ".jpg", ".jpeg", ".gif", ".tif", ".tiff", ".bmp", ".webp"}:
-                img = PILImage.open(io.BytesIO(data)).convert("RGB")
-                images_for_pdf.append(img)
-            elif ext == ".pdf":
-                # Embed raw PDF pages as images via pdf2image if available, else skip
-                try:
-                    from pdf2image import convert_from_bytes
-                    pages = convert_from_bytes(data, dpi=150)
-                    images_for_pdf.extend([p.convert("RGB") for p in pages])
-                except Exception:
-                    pass  # pdf2image not installed — skip PDF attachments
-        except Exception:
-            continue
-
-    if not images_for_pdf:
-        return None
-
-    out = BytesIO()
-    first = images_for_pdf[0]
-    rest  = images_for_pdf[1:] if len(images_for_pdf) > 1 else []
-    first.save(out, format="PDF", save_all=True, append_images=rest, resolution=150)
-    return out.getvalue(), pdf_name
-
 
 # ── Research engine ────────────────────────────────────────────────────────────
 
