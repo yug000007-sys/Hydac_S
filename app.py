@@ -86,31 +86,37 @@ def decide_attachment(filename: str, attachment_obj=None, subject: str = ""):
     if not filename:
         return {"filename": "", "decision": "Reject", "reason": "Blank filename"}
     name = Path(filename).name
-    low = name.lower()
-    ext = Path(low).suffix
+    low  = name.lower()
+    ext  = Path(low).suffix
+
     if ext not in VALID_ATTACHMENT_EXTENSIONS:
         return {"filename": name, "decision": "Reject", "reason": f"Unsupported extension {ext or '(none)'}"}
+
+    # Explicit signature/logo names — always reject
     if low in SIGNATURE_IMAGE_NAMES:
         return {"filename": name, "decision": "Reject", "reason": "Signature/logo image"}
-    # Generic image name (e.g. image004.jpg, image004(timestamp).jpg) —
-    # keep if subject looks like an RFQ/product email, otherwise reject
-    if re.match(r"image[\d(]", low) and ext in IMAGE_EXTENSIONS:
-        subject_is_rfq = bool(re.search(
-            r"(?i)(rfq|quote|inquiry|request|part|bieri|hydac|filter|pump|drawing|spec)",
-            subject or ""
-        ))
-        if subject_is_rfq:
-            return {"filename": name, "decision": "Keep", "reason": "Inline product image (RFQ email)", "obj": attachment_obj}
-        return {"filename": name, "decision": "Reject", "reason": "Generic inline signature image"}
-    # Plain "image.png" / "image.jpg" with no number — always reject (signature logo)
-    if re.fullmatch(r"image\.(png|jpg|jpeg|gif|tif|tiff)", low):
+
+    # Plain image.ext with NO number (image.png, image.jpg) — signature logo
+    if re.fullmatch(r"image[.](png|jpg|jpeg|gif|tif|tiff)", low):
         return {"filename": name, "decision": "Reject", "reason": "Signature/logo image"}
+
+    # Numbered inline images: image004.jpg, image004(timestamp).jpg
+    # These are always product photos embedded by email clients — keep unconditionally
+    if re.match(r"image[0-9]", low) and ext in IMAGE_EXTENSIONS:
+        return {"filename": name, "decision": "Keep", "reason": "Numbered inline product image", "obj": attachment_obj}
+
+    # Non-image documents — always keep
     if ext not in IMAGE_EXTENSIONS:
         return {"filename": name, "decision": "Keep", "reason": "Document/CAD/spreadsheet attachment", "obj": attachment_obj}
-    if re.search(r"\d{4,}", name):
+
+    # Images with 4+ digit part/model number in filename
+    if re.search(r"[0-9]{4,}", name):
         return {"filename": name, "decision": "Keep", "reason": "Image has part/model number", "obj": attachment_obj}
+
+    # Images with product keywords
     if re.search(r"(?i)(pump|filter|drawing|label|plate|model|part|hydraulic|spec|quote|serial|bieri)", name):
         return {"filename": name, "decision": "Keep", "reason": "Image has product keyword", "obj": attachment_obj}
+
     return {"filename": name, "decision": "Reject", "reason": "Image not customer evidence"}
 
 # ── Lead PDF generator ────────────────────────────────────────────────────────
